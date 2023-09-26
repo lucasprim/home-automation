@@ -1,0 +1,138 @@
+blueprint:
+  name: Awtrix Light - Remember the Plants!
+  description: Displays plant watering notifications on multiple Awtrix Displays
+  domain: automation
+  input:
+    plants:
+      name: "Plants"
+      description: "Moisture sensors to monitor"
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - device_class: moisture
+    awtrix_lights:
+      name: "Awtrix Lights"
+      description: "Awtrix light devices to send watering notifications to"
+      selector:
+        device:
+          multiple: true
+          filter:
+            - integration: mqtt
+              manufacturer: Blueforcer
+              model: AWTRIX Light
+    moisture_threshold:
+      name: "Moisture Threshold (%)"
+      description: "You'll start getting notifications once the moisture gets equal or below this percentage"
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+    scroll_speed:
+      name: "Scroll Speed"
+      description: "Percentage of the original scrolling speed used to scroll the text"
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 200
+    switch_to_app:
+      name: "Switch to app when below threshold"
+      description: "Wether the app should take the screen when one or more plants are below the humidity threshold"
+      default: true
+      selector:
+        boolean:
+    rtttl_when_below_threshold:
+      name: "RTTTL when below threshold"
+      description: "RTTTL sound to play when one of the plants is below the moisture threshold (leave empty to disable)"
+      default: "scale_up:d=32,o=5,b=100:c,c#,d#,e,f#,g#,a#,b"
+      selector:
+        text:
+mode: single
+variables:
+  plants: !input plants
+  threshold: !input moisture_threshold
+  scroll_speed: !input scroll_speed
+  switch_to_app: !input switch_to_app
+  message_payload: >-
+    [
+      {% for entity in plants %}
+        {%- if states(entity) in ['unavailable', 'unknown'] -%}
+          {%- continue -%}
+        {%- endif -%}
+        {% set this_moisture = states(entity) | int %}
+        {% set this_name = state_attr(entity, 'friendly_name') | replace(" Moisture", "") %}
+        {% set this_state = this_name ~ ": " ~ this_moisture ~ "%" %}
+        {% set threshold_moisture = threshold | int %}
+        {% set this_color = 'FFFFFF' if this_moisture > threshold_moisture else 'FF0000' %}
+        {
+          "t": "{{ this_state }}",
+          "c": "{{ this_color }}"
+        }{% if not loop.last %},{ "t": " | ", "c": "FFFFFF" },{% endif %}
+      {% endfor %}
+    ]
+  device_ids: !input awtrix_lights
+  devices: >-
+    {% macro get_device(device_id) %}
+      {{ states((device_entities(device_id) | select('search','device_topic') | list)[0] | default('unknown')) }}
+    {% endmacro %}
+    {% set ns = namespace(devices=[]) %}
+    {% for device_id in device_ids %}
+      {% set device=get_device(device_id)|replace(' ','')|replace('\n','') %}
+      {% set ns.devices = ns.devices + [ device ] %}
+    {% endfor %}
+    {{ ns.devices | reject('match','unavailable|unknown') | list }}
+  rtttl_when_below_threshold: !input rtttl_when_below_threshold
+  any_plant_below_threshold: >-
+    {% set ns = namespace(found=false) %}
+    {% for entity in plants %}
+      {%- if states(entity) in ['unavailable', 'unknown'] -%}
+        {%- continue -%}
+      {%- endif -%}
+      {% set this_moisture = states(entity) | int %}
+      {% set moisture_threshold = threshold | int %}
+      {% if this_moisture <= moisture_threshold %}
+        {% set ns.found = true %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.found }}
+trigger:
+  - platform: state
+    entity_id: !input plants
+    not_to: 'unavailable'
+  - platform: state
+    entity_id: sensor.awtrix_ed5dc8_current_app
+    from: 'unavailable'
+action:
+  repeat:
+    for_each: "{{ devices }}"
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "{{ repeat.item }}/custom/plants"
+          payload: >-
+            {
+              icon: 7699,
+              pushIcon: 2,
+              text: {{ message_payload }},
+              scrollSpeed: {{ scroll_speed }}
+            }
+      - choose:
+        - conditions:
+            - "{{ any_plant_below_threshold == true }}"
+            - "{{ switch_to_app == true }}"
+          sequence:
+            - service: mqtt.publish
+              data:
+                topic: "{{ repeat.item }}/switch"
+                payload: >-
+                  { name: "plants" }
+            - choose:
+              - conditions:
+                  - "{{ rtttl_when_below_threshold != '' }}"
+                sequence:
+                  - service: mqtt.publish
+                    data:
+                      topic: "{{ repeat.item }}/rtttl"
+                      payload: "{{ rtttl_when_below_threshold }}"
