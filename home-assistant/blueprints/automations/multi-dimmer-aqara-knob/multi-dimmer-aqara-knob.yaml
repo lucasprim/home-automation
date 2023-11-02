@@ -1,0 +1,173 @@
+blueprint:
+  name: Multi Dimmer - Z2M + Aqara knob
+  domain: automation
+  description: Control multiple dimmers with a single Aqara Knob. Impress your guests with your fancy knob!
+  author: Lucas Prim (https://github.com/lucasprim)
+  input:
+    selector_helper:
+      name: Selector Helper
+      description: The Input Number helper you created to save the currently selected dimmer
+      selector:
+        entity:
+          filter:
+            - domain: input_number
+    aqara_knob:
+      name: Aqara Knob
+      description: The knob you want to add superpowers to
+      selector:
+        device:
+          filter:
+            - integration: mqtt
+              manufacturer: Xiaomi
+              model: Aqara knob H1 (wireless) (ZNXNKG02LM)
+    dimmer_lights:
+      name: Dimmers
+      description: The dimmers that you want to control with your awesome knob
+      selector:
+        entity:
+          filter:
+            - domain: light
+          multiple: true
+mode: queued
+variables:
+  knob: !input aqara_knob
+  helper: !input selector_helper
+  lights: !input dimmer_lights
+  num_lights: "{{ lights | length }}"
+trigger_variables:
+  trigger_knob: !input aqara_knob
+  knob_action_entity: "{{ (device_entities(trigger_knob) | select('search', 'action$') | list)[0] }}"
+  knob_speed_entity: "{{ (device_entities(trigger_knob) | select('search', 'angle_speed$') | list)[0] }}"
+trigger:
+  - platform: event
+    event_type: state_changed
+    event_data:
+      entity_id: "{{ knob_action_entity }}"
+    id: knob_action
+  - platform: event
+    event_type: state_changed
+    event_data:
+      entity_id: "{{ knob_speed_entity }}"
+    id: rotating_speed
+  - platform: state
+    entity_id: !input selector_helper
+    id: light_selection
+action:
+  - variables:
+      single_clicked: |
+        {% if trigger.id == 'knob_action' and trigger.event.data.new_state.state == 'single' %}
+          true
+        {% endif %}
+      double_clicked: |
+        {% if trigger.id == 'knob_action' and trigger.event.data.new_state.state == 'double' %}
+          true
+        {% endif %}
+      hold: |
+        {% if trigger.id == 'knob_action' and trigger.event.data.new_state.state == 'hold' %}
+          true
+        {% endif %}
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: knob_action
+          - condition: template
+            value_template: "{{ single_clicked }}"
+        sequence:
+          - choose:
+              # Change light to next
+              - conditions: "{{ states(helper) | int < num_lights }}"
+                sequence:
+                  - service: input_number.increment
+                    target:
+                      entity_id: "{{ helper }}"
+                    data: {}
+              # Change light back to first if its the last one
+              - conditions: "{{ states(helper) | int >= num_lights }}"
+                sequence:
+                  - service: input_number.set_value
+                    target:
+                      entity_id: "{{ helper }}"
+                    data:
+                      value: 1
+      - conditions:
+          - condition: trigger
+            id: light_selection
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ trigger.to_state.state | int != 0 }}"
+            then:
+              - service: light.toggle
+                data:
+                  entity_id: >-
+                    {{ lights[states(helper) | int - 1] }}
+                  transition: 0
+              - delay:
+                  hours: 0
+                  minutes: 0
+                  seconds: 0
+                  milliseconds: 500
+              - service: light.toggle
+                data:
+                  entity_id: >-
+                    {{ lights[states(helper) | int - 1] }}
+                  transition: 0
+            else:
+              - service: light.turn_off
+                target:
+                  entity_id: "{{ lights }}"
+              - delay:
+                  hours: 0
+                  minutes: 0
+                  seconds: 0
+                  milliseconds: 500
+              - service: light.turn_on
+                data:
+                  brightness_pct: 100
+                target:
+                  entity_id: "{{ lights }}"
+      - conditions:
+          - condition: trigger
+            id: rotating_speed
+        sequence:
+          - variables:
+              speed: "{{ trigger.event.data.new_state.state | int }}"
+          - if:
+              - condition: template
+                value_template: "{{ speed != 0 }}"
+            then:
+              - service: light.turn_on
+                data:
+                  entity_id: |
+                    {% if states(helper) | int != 0 %}
+                      {{ lights[states(helper) | int - 1] }}
+                    {% else %}
+                      {{ lights }}
+                    {% endif %}
+                  brightness_step_pct: |
+                    {{ speed / 12 }}
+      - conditions:
+          - condition: trigger
+            id: knob_action
+          - condition: template
+            value_template: "{{ double_clicked }}"
+        sequence:
+          - service: light.toggle
+            data:
+              entity_id: |
+                {% if states(helper) | int != 0 %}
+                  {{ lights[states(helper) | int - 1] }}
+                {% else %}
+                  {{ lights }}
+                {% endif %}
+      - conditions:
+          - condition: trigger
+            id: knob_action
+          - condition: template
+            value_template: "{{ hold }}"
+        sequence:
+          - service: input_number.set_value
+            target:
+              entity_id: "{{ helper }}"
+            data:
+              value: 0
